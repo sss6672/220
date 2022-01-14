@@ -1,0 +1,212 @@
+# This workflow uses actions that are not certified by GitHub.
+# They are provided by a third-party and are governed by
+# separate terms of service, privacy policy, and support
+# documentation.
+
+# 💁 The OpenShift Starter workflow will:
+# - Checkout your repository
+# - Perform a container image build
+# - Push the built image to the GitHub Container Registry (GHCR)
+# - Log in to your OpenShift cluster
+# - Create an OpenShift app from the image and expose it to the internet
+
+# ℹ️ Configure your repository and the workflow with the following steps:
+# 1. Have access to an OpenShift cluster. Refer to https://www.openshift.com/try
+# 2. Create the OPENSHIFT_SERVER and OPENSHIFT_TOKEN repository secrets. Refer to:
+#   - https://github.com/redhat-actions/oc-login#readme
+#   - https://docs.github.com/en/actions/reference/encrypted-secrets
+#   - https://cli.github.com/manual/gh_secret_set
+# 3. (Optional) Edit the top-level 'env' section as marked with '🖊️' if the defaults are not suitable for your project.
+# 4. (Optional) Edit the build-image step to build your project.
+#    The default build type is by using a Dockerfile at the root of the repository,
+#    but can be replaced with a different file, a source-to-image build, or a step-by-step buildah build.
+# 5. Commit and push the workflow file to your default branch to trigger a workflow run.
+
+# 👋 Visit our GitHub organization at https://github.com/redhat-actions/ to see our actions and provide feedback.
+
+name: OpenShift
+
+env:
+  # 🖊️ EDIT your repository secrets to log into your OpenShift cluster and set up the context.
+  # See https://github.com/redhat-actions/oc-login#readme for how to retrieve these values.
+  # To get a permanent token, refer to https://github.com/redhat-actions/oc-login/wiki/Using-a-Service-Account-for-GitHub-Actions
+  OPENSHIFT_SERVER: ${{ secrets.OPENSHIFT_SERVER }}
+  OPENSHIFT_TOKEN: ${{ secrets.OPENSHIFT_TOKEN }}
+  # 🖊️ EDIT to set the kube context's namespace after login. Leave blank to use your user's default namespace.
+  OPENSHIFT_NAMESPACE: ""
+
+  # 🖊️ EDIT to set a name for your OpenShift app, or a default one will be generated below.
+  APP_NAME: ""
+
+  # 🖊️ EDIT with the port your application should be accessible on.
+  # If the container image exposes *exactly one* port, this can be left blank.
+  # Refer to the 'port' input of https://github.com/redhat-actions/oc-new-app
+  APP_PORT: ""
+
+  # 🖊️ EDIT to change the image registry settings.
+  # Registries such as GHCR, Quay.io, and Docker Hub are supported.
+  IMAGE_REGISTRY: ghcr.io/${{ github.repository_owner }}
+  IMAGE_REGISTRY_USER: ${{ github.actor }}
+  IMAGE_REGISTRY_PASSWORD: ${{ github.token }}
+
+  # 🖊️ EDIT to specify custom tags for the container image, or default tags will be generated below.
+  IMAGE_TAGS: ""
+
+on:
+  # https://docs.github.com/en/actions/reference/events-that-trigger-workflows
+  push:
+    # Edit to the branch(es) you want to build and deploy on each push.
+    branches: [ main ]
+
+jobs:
+  openshift-ci-cd:
+    name: Build and deploy to OpenShift
+    # ubuntu-20.04 can also be used.
+    runs-on: ubuntu-18.04
+    environment: production
+
+    outputs:
+      ROUTE: ${{ steps.deploy-and-expose.outputs.route }}
+      SELECTOR: ${{ steps.deploy-and-expose.outputs.selector }}
+
+    steps:
+    - name: Check for required secrets
+      uses: actions/github-script@v4
+      with:
+        script: |
+          const secrets = {
+            OPENSHIFT_SERVER: `${{ secrets.OPENSHIFT_SERVER }}`,
+            OPENSHIFT_TOKEN: `${{ secrets.OPENSHIFT_TOKEN }}`,
+          };
+
+          const GHCR = "ghcr.io";
+          if (`${{ env.IMAGE_REGISTRY }}`.startsWith(GHCR)) {
+            core.info(`Image registry is ${GHCR} - no registry password required`);
+          }
+          else {
+            core.info("A registry password is required");
+            secrets["IMAGE_REGISTRY_PASSWORD"] = `${{ secrets.IMAGE_REGISTRY_PASSWORD }}`;
+          }
+
+          const missingSecrets = Object.entries(secrets).filter(([ name, value ]) => {
+            if (value.length === 0) {
+              core.error(`Secret "${name}" is not set`);
+              return true;
+            }
+            core.info(`✔️ Secret "${name}" is set`);
+            return false;
+          });
+
+          if (missingSecrets.length > 0) {
+            core.setFailed(`❌ At least one required secret is not set in the repository. \n` +
+              "You can add it using:\n" +
+              "GitHub UI: https://docs.github.com/en/actions/reference/encrypted-secrets#creating-encrypted-secrets-for-a-repository \n" +
+              "GitHub CLI: https://cli.github.com/manual/gh_secret_set \n" +
+              "Also, refer to https://github.com/redhat-actions/oc-login#getting-started-with-the-action-or-see-example");
+          }
+          else {
+            core.info(`✅ All the required secrets are set`);
+          }
+
+    - name: Check out repository
+      uses: actions/checkout@v2
+
+    - name: Determine app name
+      if: env.APP_NAME == ''
+      run: |
+        echo "APP_NAME=$(basename $PWD)" | tee -a $GITHUB_ENV
+
+    - name: Determine image tags
+      if: env.IMAGE_TAGS == ''
+      run: |
+        echo "IMAGE_TAGS=latest ${GITHUB_SHA::12}" | tee -a $GITHUB_ENV
+
+    # https://github.com/redhat-actions/buildah-build#readme
+    - name: Build from Dockerfile
+      id: build-image
+      uses: redhat-actions/buildah-build@v2
+      with:
+        image: ${{ env.APP_NAME }}
+        tags: ${{ env.IMAGE_TAGS }}
+
+        # If you don't have a Dockerfile/Containerfile, refer to https://github.com/redhat-actions/buildah-build#scratch-build-inputs
+        # Or, perform a source-to-image build using https://github.com/redhat-actions/s2i-build
+        # Otherwise, point this to your Dockerfile/Containerfile relative to the repository root.
+        dockerfiles: |
+          ./Dockerfile
+
+    # https://github.com/redhat-actions/push-to-registry#readme
+    - name: Push to registry
+      id: push-image
+      uses: redhat-actions/push-to-registry@v2
+      with:
+        image: ${{ steps.build-image.outputs.image }}
+        tags: ${{ steps.build-image.outputs.tags }}
+        registry: ${{ env.IMAGE_REGISTRY }}
+        username: ${{ env.IMAGE_REGISTRY_USER }}
+        password: ${{ env.IMAGE_REGISTRY_PASSWORD }}
+
+    # The path the image was pushed to is now stored in ${{ steps.push-image.outputs.registry-path }}
+
+    - name: Install oc
+      uses: redhat-actions/openshift-tools-installer@v1
+      with:
+        oc: 4
+
+    # https://github.com/redhat-actions/oc-login#readme
+    - name: Log in to OpenShift
+      uses: redhat-actions/oc-login@v1
+      with:
+        openshift_server_url: ${{ env.OPENSHIFT_SERVER }}
+        openshift_token: ${{ env.OPENSHIFT_TOKEN }}
+        insecure_skip_tls_verify: true
+        namespace: ${{ env.OPENSHIFT_NAMESPACE }}
+
+    # This step should create a deployment, service, and route to run your app and expose it to the internet.
+    # https://github.com/redhat-actions/oc-new-app#readme
+    - name: Create and expose app
+      id: deploy-and-expose
+      uses: redhat-actions/oc-new-app@v1
+      with:
+        app_name: ${{ env.APP_NAME }}
+        image: ${{ steps.push-image.outputs.registry-path }}
+        namespace: ${{ env.OPENSHIFT_NAMESPACE }}
+        port: ${{ env.APP_PORT }}
+
+    - name: Print application URL
+      env:
+        ROUTE: ${{ steps.deploy-and-expose.outputs.route }}
+        SELECTOR: ${{ steps.deploy-and-expose.outputs.selector }}
+      run: |
+        [[ -n ${{ env.ROUTE }} ]] || (echo "Determining application route failed in previous step"; exit 1)
+        echo
+        echo "======================== Your application is available at: ========================"
+        echo ${{ env.ROUTE }}
+        echo "==================================================================================="
+        echo
+        echo "Your app can be taken down with: \"oc delete all --selector='${{ env.SELECTOR }}'\""
+- название: Настройка Node.js окружающая среда
+использует: actions/setup-node@v2.5.1
+с:
+ # Установить всегда-аутентификацию в npmrc
+всегда-аутентификация: # необязательно, значение по умолчанию-false
+ # Спецификация версии используемой версии. Примеры: 12.x, 10.15.1, >=10.15.0
+ версия узла: # необязательно
+ # Файл, содержащий спецификацию используемой версии. Примеры: .nvmrc, .
+node-версия файл узла-версии: # необязательно
+ # Целевая архитектура для использования узлом. Примеры: x86, x64. По умолчанию будет использоваться системная архитектура.
+ архитектура: # необязательно
+ # Установите этот параметр, если вы хотите, чтобы действие проверяло наличие последней доступной версии, которая соответствует спецификации версии
+, проверьте последнюю версию: # необязательно
+ # Дополнительный реестр для настройки аутентификации. Установит реестр на уровне проекта .npmrc и .файл yarnrc и настройте аутентификацию для чтения из реестра env.NODE_AUTH_TOKEN
+-url: # необязательно
+ # Необязательная область для проверки подлинности в реестрах с
+областью действия: # необязательно
+ # Используется для извлечения дистрибутивов узлов из версий узлов. Поскольку существует значение по умолчанию, оно обычно не предоставляется пользователем.
+ токен: # необязательно, по умолчанию ${{ github.токен }}
+ # Используется для указания менеджера пакетов для кэширования в каталоге по умолчанию. Поддерживаемые значения: npm, yarn, pnpm
+кэш: # необязательно
+ # Используется для указания пути к файлу зависимостей: package-lock.json, yarn.lock и т. Д. Поддерживает подстановочные знаки или список имен файлов для кэширования нескольких зависимостей.
+ путь к зависимости от кэша: # необязательно
+ # Устарело. Вместо этого используйте версию узла. Не будет поддерживаться после 1 октября 2019 года
+ версия: # необязательно
